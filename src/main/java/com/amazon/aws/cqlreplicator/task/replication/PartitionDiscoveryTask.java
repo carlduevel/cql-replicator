@@ -8,6 +8,8 @@ import com.amazon.aws.cqlreplicator.task.AbstractTask;
 import com.amazon.aws.cqlreplicator.util.Utils;
 import com.datastax.oss.driver.api.core.cql.BoundStatementBuilder;
 import com.datastax.oss.driver.api.core.cql.Row;
+import com.google.common.collect.Range;
+import com.google.common.collect.RangeSet;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -55,6 +57,17 @@ public class PartitionDiscoveryTask extends AbstractTask {
     ledgerStorageOnLevelDB = new LedgerStorageOnLevelDB(config);
   }
 
+  private static List<Range<Long>> batches(Long start, Long end, Long batchSize){
+    Long batchEnd = start;
+    List<Range<Long>> batches = new ArrayList<>();
+    for (var batchStart = start;batchStart <= end; batchStart=batchEnd+1) {
+      batchEnd = Math.min(batchEnd + batchSize, end);
+      Range<Long> range = Range.closed(batchStart, batchEnd);
+      batches.add(range);
+    }
+    return batches;
+  }
+
   /** Scan and compare partition keys. */
   private void scanAndCompare(
       List<ImmutablePair<String, String>> rangeList, CacheStorage pkCache, String[] pks)
@@ -86,15 +99,18 @@ public class PartitionDiscoveryTask extends AbstractTask {
     if (!totalChunksExist)
       pkCache.put(String.format("%s|%s", config.getProperty("TILE"), "totalChunks"), "0");
 
+    Long batchSize = Long.valueOf(config.getProperty("READ_BATCH_SIZE"));
+
     var pksStr = String.join(",", pks);
 
     for (ImmutablePair<String, String> range : rangeList) {
       var rangeStart = Long.parseLong(range.left);
       var rangeEnd = Long.parseLong(range.right);
-
-      var resultSetRange =
-          sourceStorageOnCassandra.findPartitionsByTokenRange(pksStr, rangeStart, rangeEnd);
-
+      List<Row> resultSetRange = new ArrayList<>();
+      for (Range<Long> batch : batches(rangeStart,rangeEnd, batchSize)){
+        resultSetRange.addAll(sourceStorageOnCassandra.findPartitionsByTokenRange(pksStr, batch.lowerEndpoint(),
+                batch.upperEndpoint()));
+      }
       LOGGER.trace("Processing a range: {} - {}", rangeStart, rangeEnd);
       for (Row eachResult : resultSetRange) {
         var i = 0;
